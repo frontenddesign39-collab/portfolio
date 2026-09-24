@@ -3,52 +3,71 @@ import { useEffect, useRef } from 'react'
 export type Quality = 'hd' | 'sd'
 export const SRC: Record<Quality, string> = { hd: '/hero-1080.mp4', sd: '/hero-720.mp4' }
 
-// -1: the man faces toward whichever side of the screen the cursor is currently on.
-// Set to 1 to reverse.
-const DIRECTION = -1
-// How quickly the video eases toward the mouse's current position each frame (0-1).
-// Higher = snappier/more literal, lower = smoother/more lag.
-const EASE = 0.18
+// --- Where the head actually sits on screen -------------------------------
+// As a ratio of viewport width/height. The video is object-cover cropped with
+// object-[60%_center] (mobile) / md:object-[70%_center] (desktop), so the head
+// sits roughly here — TUNE THESE by eye once you see it live; they'll drift
+// depending on viewport aspect ratio.
+const HEAD_X_RATIO = 0.6
+const HEAD_Y_RATIO = 0.22
+
+// --- Keyframes measured directly from the clip ----------------------------
+// angle = degrees from straight up, sweeping through the right side only
+// (0=up, 90=level with the ear, 180=straight down/neck). The left side reuses
+// these same times but mirrors the video horizontally, since the footage only
+// turns one way.
+const KEYFRAMES: { angle: number; time: number }[] = [
+  { angle: 0, time: 1.55 },   // near the top of the head -> looks straight up
+  { angle: 45, time: 1.15 },  // near the ear -> looks over, head tilted up
+  { angle: 135, time: 4.10 }, // near the jaw/beard -> looks over, head tilted down
+  { angle: 180, time: 2.30 }, // near the neck -> looks straight down
+]
+
+function timeForAngle(angle: number): number {
+  const a = Math.min(180, Math.max(0, angle))
+  for (let i = 0; i < KEYFRAMES.length - 1; i++) {
+    const cur = KEYFRAMES[i]
+    const next = KEYFRAMES[i + 1]
+    if (a >= cur.angle && a <= next.angle) {
+      const span = next.angle - cur.angle
+      const p = span === 0 ? 0 : (a - cur.angle) / span
+      return cur.time + (next.time - cur.time) * p
+    }
+  }
+  return KEYFRAMES[KEYFRAMES.length - 1].time
+}
 
 export default function App({ quality }: { quality: Quality }) {
   const videoRef = useRef<HTMLVideoElement>(null)
-  // Where the video SHOULD be right now, based on the mouse's current absolute position.
-  const targetTime = useRef<number | null>(null)
-  const rafId = useRef<number | null>(null)
 
   useEffect(() => {
-    // Map the cursor's absolute x position (not movement delta) directly to a point
-    // in the video, so the man always faces the direction the mouse currently is.
-    const setTargetFromClientX = (clientX: number) => {
-      const v = videoRef.current
-      if (!v || !v.duration || !isFinite(v.duration)) return
-      const ratio = Math.min(1, Math.max(0, clientX / window.innerWidth))
-      const t = DIRECTION === -1 ? ratio : 1 - ratio
-      targetTime.current = t * v.duration
-    }
+    const v = videoRef.current
+    v?.pause()
 
-    // pointer events cover mouse, pen and touch
-    const onMove = (e: PointerEvent) => setTargetFromClientX(e.clientX)
+    // Frame is set ONLY here, inside the event handler — no timer, no
+    // animation loop anywhere in this file, so the video never advances by
+    // itself between mouse moves.
+    const onMove = (e: PointerEvent) => {
+      const vid = videoRef.current
+      if (!vid || !vid.duration || !isFinite(vid.duration)) return
+      if (vid.seeking) return
 
-    // Continuously ease currentTime toward the target every frame, independent of
-    // how often pointermove fires, so the facing direction never drifts or lags behind.
-    const tick = () => {
-      const v = videoRef.current
-      if (v && targetTime.current !== null && !v.seeking) {
-        const diff = targetTime.current - v.currentTime
-        if (Math.abs(diff) > 0.004) {
-          v.currentTime = v.currentTime + diff * EASE
-        }
-      }
-      rafId.current = requestAnimationFrame(tick)
+      const headX = window.innerWidth * HEAD_X_RATIO
+      const headY = window.innerHeight * HEAD_Y_RATIO
+      const dx = e.clientX - headX
+      const dy = e.clientY - headY
+
+      // Angle from straight up (0°) through level with the head (90°) to
+      // straight down (180°), regardless of which side the cursor is on.
+      const angle = (Math.atan2(Math.abs(dx), -dy) * 180) / Math.PI
+      const mirror = dx < 0 // cursor is left of the head -> flip the clip
+
+      vid.currentTime = timeForAngle(angle)
+      vid.style.transform = mirror ? 'scaleX(-1)' : 'none'
     }
 
     window.addEventListener('pointermove', onMove)
-    rafId.current = requestAnimationFrame(tick)
-    return () => {
-      window.removeEventListener('pointermove', onMove)
-      if (rafId.current !== null) cancelAnimationFrame(rafId.current)
-    }
+    return () => window.removeEventListener('pointermove', onMove)
   }, [])
 
   return (
